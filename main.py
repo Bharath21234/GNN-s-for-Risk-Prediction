@@ -28,6 +28,9 @@ def fetch_stock_data_with_tail_risk(tickers, start_date, end_date, window=5, alp
         # Compute daily returns
         df['Return'] = df['Close'].pct_change()
 
+        #Compute Volality
+        df["vol"] = df["Return"].rolling(window).std()
+
         # Compute rolling VaR at alpha level
         df['VaR'] = df['Return'].rolling(window).quantile(alpha)
 
@@ -51,6 +54,45 @@ def fetch_stock_data_with_tail_risk(tickers, start_date, end_date, window=5, alp
     return stock_data_dict
 
 
+def build_aligned_panel(dict, tickers):
+    """
+    Build a time-aligned panel DataFrame across multiple tickers.
+
+    Returns
+    -------
+    panel : pd.DataFrame
+        Wide DataFrame with columns like:
+        Return_AAPL, vol_AAPL, VaR_AAPL, Tail_AAPL, ...
+    valid_dates : pd.DatetimeIndex
+        Dates where both t and t+1 exist (used for next-day labels).
+    """
+
+    # Find common dates across all tickers
+    common_index = None
+    for ticker in tickers:
+        index = dict[ticker].index
+        common_index = index if common_index is None else common_index.intersection(index)
+
+    common_index = common_index.sort_values()
+
+    #  Build wide panel (one row = one date, many ticker features)
+    cols = {}
+    for tkr in tickers:
+        d = dict[tkr].reindex(common_index)
+        cols[f"Return_{tkr}"] = d["Return"]
+        cols[f"vol_{tkr}"]    = d["vol"]
+        cols[f"VaR_{tkr}"]    = d["VaR"]
+        cols[f"Tail_Risk_{tkr}"]   = d["Tail_Risk"]
+
+    panel = pd.DataFrame(cols, index=common_index)
+
+    # 3️ Drop dates where rolling stats are not ready
+    panel = panel.dropna()
+
+    # 4 We need (t, t+1), so last date cannot be used
+    valid_dates = panel.index[:-1]
+
+    return panel, valid_dates
 
 
 if __name__ == "__main__":
@@ -61,6 +103,9 @@ if __name__ == "__main__":
     window = 5
     alpha = 0.05
     stock_data = fetch_stock_data_with_tail_risk(tickers, start_date, end_date, window, alpha)
+    df,valid_dates=build_aligned_panel(stock_data,tickers)
+    print(df.head(5))
+    print(df.columns)
 
     for ticker, df in stock_data.items():
         print(f"\nData for {ticker}:")
