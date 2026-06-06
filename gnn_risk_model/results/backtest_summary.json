@@ -1,0 +1,17 @@
+{
+  "GNN (GraphSAGE)": {
+    "mean_violation_rate": 0.016645326504481434,
+    "kupiec_pass_pct": 13.131313131313133,
+    "cc_pass_pct": 4.040404040404041
+  },
+  "GARCH(1,1)": {
+    "mean_violation_rate": 0.023230290835924643,
+    "kupiec_pass_pct": 20.2020202020202,
+    "cc_pass_pct": 0.0
+  },
+  "GJR-GARCH": {
+    "mean_violation_rate": 0.02410422128731988,
+    "kupiec_pass_pct": 27.27272727272727,
+    "cc_pass_pct": 0.0
+  }
+}

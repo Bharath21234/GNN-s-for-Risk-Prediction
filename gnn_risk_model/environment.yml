@@ -1,0 +1,22 @@
+name: gnn-risk
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy>=1.24
+  - pandas>=2.0
+  - scipy>=1.11
+  - matplotlib>=3.7
+  - seaborn>=0.12
+  - tqdm
+  # PyTorch CPU-only (for Mac without GPU)
+  - pytorch::pytorch>=2.1
+  - pytorch::cpuonly
+  - pip:
+    - yfinance>=0.2.36
+    - arch>=6.3            # GARCH / GJR-GARCH
+    - torch-geometric>=2.4
+    - pyarrow>=14.0        # parquet support
