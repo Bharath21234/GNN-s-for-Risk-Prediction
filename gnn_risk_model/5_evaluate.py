@@ -1,9 +1,18 @@
 """
-Step 5 — Evaluate and compare all models.
+Step 5 — Evaluate and compare all models (BNAIC evaluation).
 
-Computes accuracy metrics (RMSE, MAE, MAPE, QLIKE) and statistical backtests
-(Kupiec POF, Christoffersen CC) for GNN, GARCH(1,1), and GJR-GARCH.
-Produces publication-style comparison tables and plots.
+Primary (forward-looking, decision-relevant):
+  * FZ0 joint (VaR, ES) loss and pinball VaR loss vs *realised* forward returns
+  * Diebold-Mariano significance (HAC + HLN correction) for GNN vs GARCH / GJR / MLP
+  * multi-seed mean±std and fraction of seeds beating each baseline
+Calibration:
+  * VaR: Kupiec POF + Christoffersen CC (now correctly specified at alpha=5%)
+  * ES : Acerbi-Szekely Test 2 + exceedance-residual t-test
+  * non-overlapping (every-5th-day) VaR backtest as a robustness check
+Ablation:
+  * GNN vs MLP (identical model, no graph) — isolates the value of graph structure
+Secondary (reported, not headline):
+  * RMSE of predicted ES vs the backward-looking rolling-CVaR label (reconstruction)
 """
 
 import os
@@ -14,254 +23,281 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import seaborn as sns
 
 sys.path.insert(0, os.path.dirname(__file__))
 import config
-from src.metrics import compute_accuracy_metrics, backtest_model
+from src.metrics import (
+    fz0_loss, pinball_loss, diebold_mariano, backtest_model,
+    acerbi_szekely_z2, es_residual_test, rmse, moving_block_bootstrap_ci,
+)
 
-os.makedirs(config.RESULTS_DIR + "plots/", exist_ok=True)
-
+R = config.RESULTS_DIR
+os.makedirs(R + "plots/", exist_ok=True)
 sns.set_theme(style="whitegrid", palette="tab10")
-COLORS = {"GNN (GraphSAGE)": "#2196F3", "GARCH(1,1)": "#F44336", "GJR-GARCH": "#FF9800"}
+ALPHA   = config.TAIL_ALPHA
+HORIZON = config.HORIZON
+COLORS  = {"GNN": "#2196F3", "MLP (no graph)": "#9C27B0",
+           "GCN": "#00BCD4", "GARCH(1,1)": "#F44336",
+           "GJR-GARCH": "#FF9800", "Historical Sim": "#4CAF50",
+           "GNN+MLP Ensemble": "#3F51B5"}
+
+# Model registry. SEED models ship per-seed prediction stacks ({m}_test_var_seeds.npy);
+# SINGLE models ship one VaR/ES parquet ({m}_test_var.parquet). Any that are present
+# on disk are auto-detected and folded into every table — so adding the GCN or
+# historical-simulation baselines needs no change here.
+SEED_CANDIDATES   = ["gnn", "mlp", "gcn"]
+SINGLE_CANDIDATES = ["garch", "gjr", "histsim", "blend"]
+LABEL = {"gnn": "GNN", "mlp": "MLP (no graph)", "gcn": "GCN",
+         "garch": "GARCH(1,1)", "gjr": "GJR-GARCH", "histsim": "Historical Sim",
+         "blend": "GNN+MLP Ensemble"}
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Loading ─────────────────────────────────────────────────────────────────────
 
-def _align(pred_df: pd.DataFrame, target_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Align prediction and target DataFrames on dates and tickers."""
-    common_dates   = pred_df.index.intersection(target_df.index)
-    common_tickers = pred_df.columns.intersection(target_df.columns)
-    p = pred_df.loc[common_dates, common_tickers].values.flatten()
-    t = target_df.loc[common_dates, common_tickers].values.flatten()
-    return t, p
+def _load_seed_stack(name, split, q):
+    return np.load(R + f"{name}_{split}_{q}_seeds.npy")          # (S, T, N)
 
-
-def _pct_improvement(base_rmse: float, model_rmse: float) -> float:
-    return (base_rmse - model_rmse) / base_rmse * 100
-
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    print("Loading predictions and targets...")
-
-    gnn_pred    = pd.read_parquet(config.RESULTS_DIR + "gnn_test_predictions.parquet")
-    garch_pred  = pd.read_parquet(config.RESULTS_DIR + "garch_test_predictions.parquet")
-    gjr_pred    = pd.read_parquet(config.RESULTS_DIR + "gjr_test_predictions.parquet")
-    targets     = pd.read_parquet(config.RESULTS_DIR + "targets_test.parquet")
+    print("Loading predictions and labels...")
+    fwd     = pd.read_parquet(R + "fwd_test.parquet")            # realised fwd returns
+    targets = pd.read_parquet(R + "targets_test.parquet")        # rolling CVaR (reconstruction)
     returns_raw = pd.read_parquet(config.DATA_DIR + "raw/returns.parquet")
+    dates, tickers = fwd.index, list(fwd.columns)
+    Rmat = fwd.values                                            # (T, N) realised
 
-    # Align all predictions to common dates/tickers
-    gnn_pred   = gnn_pred.reindex(index=targets.index,   columns=targets.columns)
-    garch_pred = garch_pred.reindex(index=targets.index, columns=targets.columns)
-    gjr_pred   = gjr_pred.reindex(index=targets.index,   columns=targets.columns)
+    # Detect which baselines are present on disk (gnn is always required).
+    seed_models   = [m for m in SEED_CANDIDATES
+                     if os.path.exists(R + f"{m}_test_var_seeds.npy")]
+    single_models = [m for m in SINGLE_CANDIDATES
+                     if os.path.exists(R + f"{m}_test_var.parquet")]
+    MODELS = seed_models + single_models          # gnn first (reference for DM)
+    print(f"  Models detected: {', '.join(LABEL[m] for m in MODELS)}")
 
-    # ── Accuracy metrics ───────────────────────────────────────────────────────
-    print("\n── Accuracy Metrics (Test Set) ──────────────────────────────────────")
+    preds = {}
+    for name in seed_models:
+        preds[name] = {
+            "var": _load_seed_stack(name, "test", "var"),        # (S, T, N)
+            "es":  _load_seed_stack(name, "test", "es"),
+        }
+    # Single VaR/ES baselines, reindexed to the evaluation grid (S=1 axis)
+    def _reidx(fn):
+        return pd.read_parquet(R + fn).reindex(index=dates, columns=tickers).values
+    for name in single_models:
+        preds[name] = {"var": _reidx(f"{name}_test_var.parquet")[None],
+                       "es":  _reidx(f"{name}_test_es.parquet")[None]}
 
-    yt_gnn,  yp_gnn  = _align(gnn_pred,   targets)
-    yt_g11,  yp_g11  = _align(garch_pred, targets)
-    yt_gjr,  yp_gjr  = _align(gjr_pred,   targets)
+    # ── Per-seed scalar losses + ensemble predictions ──────────────────────────
+    def seed_losses(name):
+        v, e = preds[name]["var"], preds[name]["es"]
+        S = v.shape[0]
+        fz = [fz0_loss(Rmat, v[s], e[s], ALPHA) for s in range(S)]
+        pb = [pinball_loss(Rmat, v[s], ALPHA)   for s in range(S)]
+        return np.array(fz), np.array(pb)
 
-    metrics = [
-        compute_accuracy_metrics(yt_gnn, yp_gnn, "GNN (GraphSAGE)"),
-        compute_accuracy_metrics(yt_g11, yp_g11, "GARCH(1,1)"),
-        compute_accuracy_metrics(yt_gjr, yp_gjr, "GJR-GARCH"),
-    ]
-    metrics_df = pd.DataFrame(metrics).set_index("model")
+    def ensemble(name):
+        return preds[name]["var"].mean(0), preds[name]["es"].mean(0)   # (T,N),(T,N)
 
-    garch_rmse = metrics_df.loc["GARCH(1,1)", "rmse"]
-    gjr_rmse   = metrics_df.loc["GJR-GARCH",  "rmse"]
-    gnn_rmse   = metrics_df.loc["GNN (GraphSAGE)", "rmse"]
-
-    metrics_df["vs GARCH(1,1) [RMSE Δ%]"] = metrics_df["rmse"].apply(
-        lambda r: f"{_pct_improvement(garch_rmse, r):+.1f}%"
-    )
-    metrics_df["vs GJR-GARCH [RMSE Δ%]"] = metrics_df["rmse"].apply(
-        lambda r: f"{_pct_improvement(gjr_rmse, r):+.1f}%"
-    )
-
-    print(metrics_df.to_string(float_format=lambda x: f"{x:.5f}"))
-    metrics_df.to_csv(config.RESULTS_DIR + "accuracy_metrics.csv")
-
-    print(f"\n  GNN improves over GARCH(1,1) by  "
-          f"{_pct_improvement(garch_rmse, gnn_rmse):+.1f}% RMSE")
-    print(f"  GNN improves over GJR-GARCH  by  "
-          f"{_pct_improvement(gjr_rmse, gnn_rmse):+.1f}% RMSE")
-
-    # ── Backtesting ────────────────────────────────────────────────────────────
-    print("\n── Backtesting (Kupiec POF + Christoffersen CC) ─────────────────────")
-
-    bt_gnn   = backtest_model(gnn_pred,   returns_raw, horizon=config.HORIZON, alpha=1-config.CVAR_ALPHA)
-    bt_garch = backtest_model(garch_pred, returns_raw, horizon=config.HORIZON, alpha=1-config.CVAR_ALPHA)
-    bt_gjr   = backtest_model(gjr_pred,   returns_raw, horizon=config.HORIZON, alpha=1-config.CVAR_ALPHA)
-
-    print("\n  Kupiec POF test (H0: violation rate = 5%; pass = model correct):")
-    for name, bt in [("GNN",         bt_gnn),
-                     ("GARCH(1,1)",  bt_garch),
-                     ("GJR-GARCH",   bt_gjr)]:
-        s = bt["summary"]
-        print(f"    {name:20s}  viol_rate={s['mean_violation_rate']*100:.2f}%  "
-              f"kupiec_pass={s['kupiec_pass_pct']:.1f}%  "
-              f"cc_pass={s['cc_pass_pct']:.1f}%")
-
-    bt_summary = {
-        "GNN (GraphSAGE)": bt_gnn["summary"],
-        "GARCH(1,1)":      bt_garch["summary"],
-        "GJR-GARCH":       bt_gjr["summary"],
-    }
-    with open(config.RESULTS_DIR + "backtest_summary.json", "w") as f:
-        json.dump(bt_summary, f, indent=2)
-
-    # ── Sector-level RMSE breakdown ────────────────────────────────────────────
-    print("\n── Sector-level RMSE (GNN vs best GARCH) ────────────────────────────")
-    sector_map = {t: config.STOCKS.get(t, "Unknown") for t in targets.columns}
+    # ── 1. Primary forward-looking loss table ──────────────────────────────────
+    print("\n── Forward-looking losses (vs realised returns) ─────────────────────")
     rows = []
-    for sec in sorted(set(sector_map.values())):
-        tickers_sec = [t for t, s in sector_map.items() if s == sec and t in targets.columns]
-        if not tickers_sec:
-            continue
-        yt = targets[tickers_sec].values.flatten()
-        yp_gnn_s   = gnn_pred[tickers_sec].values.flatten()
-        yp_garch_s = garch_pred[tickers_sec].values.flatten()
-        yp_gjr_s   = gjr_pred[tickers_sec].values.flatten()
-        mask = np.isfinite(yt) & np.isfinite(yp_gnn_s) & np.isfinite(yp_garch_s)
+    seed_fz = {}
+    for name in MODELS:
+        fz, pb = seed_losses(name)
+        seed_fz[name] = fz
         rows.append({
-            "sector":          sec,
-            "n_stocks":        len(tickers_sec),
-            "GNN RMSE":        float(np.sqrt(np.mean((yt[mask] - yp_gnn_s[mask])**2))),
-            "GARCH RMSE":      float(np.sqrt(np.mean((yt[mask] - yp_garch_s[mask])**2))),
-            "GJR RMSE":        float(np.sqrt(np.mean((yt[mask] - yp_gjr_s[mask])**2))),
+            "model":         LABEL[name],
+            "FZ0_mean":      float(fz.mean()),  "FZ0_std": float(fz.std()),
+            "pinball_mean":  float(pb.mean()),  "pinball_std": float(pb.std()),
+            "n_seeds":       len(fz),
         })
-    sector_df = pd.DataFrame(rows).set_index("sector")
-    sector_df["GNN vs GARCH Δ%"] = sector_df.apply(
-        lambda r: f"{_pct_improvement(r['GARCH RMSE'], r['GNN RMSE']):+.1f}%", axis=1
-    )
-    print(sector_df.to_string(float_format=lambda x: f"{x:.5f}"))
-    sector_df.to_csv(config.RESULTS_DIR + "sector_rmse.csv")
+    loss_df = pd.DataFrame(rows).set_index("model")
+    # fraction of GNN seeds beating each single-value baseline
+    for base in [m for m in MODELS if m != "gnn"]:
+        thr = seed_fz[base].mean()
+        loss_df.loc["GNN", f"GNN seeds < {LABEL[base]}"] = \
+            f"{np.mean(seed_fz['gnn'] < thr)*100:.0f}%"
+    # moving-block-bootstrap 95% CI on the mean FZ0 (ensemble per-date loss series).
+    # Also record the ensemble point estimate itself: FZ0_mean above averages each
+    # seed's *independent* loss, but the DM tests and this CI both score the
+    # *ensembled* (seed-averaged) prediction, which is what you'd actually deploy
+    # and is a strictly less noisy estimator -- report both rather than let the
+    # headline number quietly understate what the significance tests already use.
+    for name in MODELS:
+        ev, ee = ensemble(name)
+        series = fz0_loss(Rmat, ev, ee, ALPHA, reduce=False).reshape(len(fwd), -1).mean(1)
+        ci = moving_block_bootstrap_ci(series, block=HORIZON, n_boot=2000)
+        loss_df.loc[LABEL[name], "FZ0_ensemble"] = float(series.mean())
+        loss_df.loc[LABEL[name], "FZ0_ci_lo"] = ci["lo"]
+        loss_df.loc[LABEL[name], "FZ0_ci_hi"] = ci["hi"]
+    print(loss_df.to_string(float_format=lambda x: f"{x:.5f}"))
+    loss_df.to_csv(R + "forward_losses.csv")
+
+    # ── 2. Diebold-Mariano significance (ensemble, per-date loss series) ────────
+    print("\n── Diebold-Mariano (FZ0 loss; neg stat ⇒ GNN better) ────────────────")
+    gnn_v, gnn_e = ensemble("gnn")
+    dm_rows = []
+    for base in [m for m in MODELS if m != "gnn"]:
+        bv, be = ensemble(base)
+        la = fz0_loss(Rmat, gnn_v, gnn_e, ALPHA, reduce=False).reshape(len(dates), -1).mean(1)
+        lb = fz0_loss(Rmat, bv,    be,    ALPHA, reduce=False).reshape(len(dates), -1).mean(1)
+        dm = diebold_mariano(la, lb, horizon=HORIZON)
+        dm_rows.append({"comparison": f"GNN vs {LABEL[base]}", **dm})
+        print(f"  GNN vs {LABEL[base]:16s}  DM={dm['dm_stat']:+.3f}  p={dm['p_value']:.4g}  "
+              f"mean_diff={dm['mean_diff']:+.5f}")
+    pd.DataFrame(dm_rows).to_csv(R + "dm_tests.csv", index=False)
+
+    # ── 3. VaR backtests (Kupiec + CC, correctly specified at 5%) ──────────────
+    print("\n── VaR backtests (Kupiec POF + Christoffersen CC; target 5%) ────────")
+    var_bt, es_bt = {}, {}
+    for name in MODELS:
+        v, e = ensemble(name)
+        vdf = pd.DataFrame(v, index=dates, columns=tickers)
+        bt  = backtest_model(vdf, returns_raw, horizon=HORIZON, alpha=ALPHA)
+        var_bt[name] = bt["summary"]
+        # ES calibration on all (t,n)
+        z2 = acerbi_szekely_z2(Rmat.flatten(), v.flatten(), e.flatten(), ALPHA)
+        rt = es_residual_test(Rmat.flatten(), v.flatten(), e.flatten())
+        es_bt[name] = {"z2": z2["z2"], "z2_p": z2["p_value"],
+                       "es_resid_ratio": rt["mean_ratio"], "es_resid_p": rt["p_value"]}
+        s = bt["summary"]
+        print(f"  {LABEL[name]:16s}  viol={s['mean_violation_rate']*100:5.2f}%  "
+              f"kupiec_pass={s['kupiec_pass_pct']:5.1f}%  cc_pass={s['cc_pass_pct']:5.1f}%")
+    pd.DataFrame(var_bt).T.to_csv(R + "var_backtest.csv")
+
+    print("\n── ES backtests (Acerbi-Szekely Z2; Z2<0 ⇒ risk under-estimated) ────")
+    for name in MODELS:
+        b = es_bt[name]
+        print(f"  {LABEL[name]:16s}  Z2={b['z2']:+.3f} (p={b['z2_p']:.3g})  "
+              f"ES-resid ratio={b['es_resid_ratio']:.3f} (p={b['es_resid_p']:.3g})")
+    pd.DataFrame(es_bt).T.to_csv(R + "es_backtest.csv")
+
+    # ── 4. Non-overlapping VaR backtest (every 5th day) — robustness (P1-5) ─────
+    print("\n── Non-overlapping VaR backtest (every 5th day) ─────────────────────")
+    nov_rows = {}
+    for name in MODELS:
+        v, _ = ensemble(name)
+        vdf = pd.DataFrame(v, index=dates, columns=tickers).iloc[::HORIZON]
+        bt  = backtest_model(vdf, returns_raw, horizon=HORIZON, alpha=ALPHA)
+        nov_rows[name] = bt["summary"]
+        s = bt["summary"]
+        print(f"  {LABEL[name]:16s}  viol={s['mean_violation_rate']*100:5.2f}%  "
+              f"kupiec_pass={s['kupiec_pass_pct']:5.1f}%")
+    pd.DataFrame(nov_rows).T.to_csv(R + "nonoverlap_var_backtest.csv")
+
+    # ── 5. Sector-level forward loss (the story) ───────────────────────────────
+    print("\n── Sector-level FZ0 loss (GNN vs best GARCH) ────────────────────────")
+    sec_map = {t: config.STOCKS.get(t, "Unknown") for t in tickers}
+    col_idx = {t: i for i, t in enumerate(tickers)}
+    ens = {n: ensemble(n) for n in MODELS}
+    gv, ge = ens["gnn"]
+    srows = []
+    for sec in sorted(set(sec_map.values())):
+        cols = [col_idx[t] for t in tickers if sec_map[t] == sec]
+        if not cols:
+            continue
+        rr = Rmat[:, cols]
+        d = {"sector": sec, "n_stocks": len(cols)}
+        for n in MODELS:
+            v, e = ens[n]
+            d[f"{LABEL[n]} FZ0"] = fz0_loss(rr, v[:, cols], e[:, cols], ALPHA)
+        d["GNN vs GARCH Δ%"] = (d["GARCH(1,1) FZ0"] - d["GNN FZ0"]) / abs(d["GARCH(1,1) FZ0"]) * 100
+        # per-sector Diebold-Mariano (GNN vs GARCH and vs MLP) on per-date FZ0 loss
+        la = fz0_loss(rr, gv[:, cols], ge[:, cols], ALPHA, reduce=False).reshape(len(dates), -1).mean(1)
+        for base, tag in [(b, t) for b, t in [("garch", "GARCH"), ("mlp", "MLP")] if b in MODELS]:
+            bv, be = ens[base]
+            lb = fz0_loss(rr, bv[:, cols], be[:, cols], ALPHA, reduce=False).reshape(len(dates), -1).mean(1)
+            dm = diebold_mariano(la, lb, horizon=HORIZON)
+            d[f"DM vs {tag}"] = dm["dm_stat"]
+            d[f"p vs {tag}"]  = dm["p_value"]
+        srows.append(d)
+    sector_df = pd.DataFrame(srows).set_index("sector")
+    gnn_wins = (sector_df["GNN FZ0"] < sector_df["GARCH(1,1) FZ0"]).sum()
+    print(sector_df.to_string(float_format=lambda x: f"{x:.4f}"))
+    print(f"  GNN beats GARCH on FZ0 in {gnn_wins}/{len(sector_df)} sectors")
+    sector_df.to_csv(R + "sector_forward_loss.csv")
+
+    # ── 6. Secondary: reconstruction RMSE (ES vs rolling-CVaR label) ────────────
+    print("\n── (secondary) Reconstruction RMSE: ES vs rolling-CVaR label ────────")
+    rec_rows = []
+    yt = targets.values.flatten()
+    for name in MODELS:
+        _, e = ensemble(name)
+        m = np.isfinite(yt) & np.isfinite(e.flatten())
+        rec_rows.append({"model": LABEL[name], "recon_RMSE": rmse(yt[m], e.flatten()[m])})
+    rec_df = pd.DataFrame(rec_rows).set_index("model")
+    print(rec_df.to_string(float_format=lambda x: f"{x:.5f}"))
+    rec_df.to_csv(R + "reconstruction_rmse.csv")
+
+    # ── Combined JSON summary ──────────────────────────────────────────────────
+    with open(R + "backtest_summary.json", "w") as f:
+        json.dump({"var_backtest": var_bt, "es_backtest": es_bt,
+                   "forward_losses": loss_df.to_dict(),
+                   "dm_tests": dm_rows,
+                   "sector_gnn_wins": int(gnn_wins)}, f, indent=2, default=float)
 
     # ── Plots ──────────────────────────────────────────────────────────────────
     print("\nGenerating plots...")
-    _plot_rmse_bar(metrics_df)
-    _plot_cvar_timeseries(gnn_pred, garch_pred, gjr_pred, targets)
-    _plot_sector_heatmap(sector_df)
-    _plot_violation_rates(bt_gnn, bt_garch, bt_gjr, targets.columns.tolist())
-    _plot_scatter(yt_gnn, yp_gnn, yt_g11, yp_g11, yt_gjr, yp_gjr)
-
-    print(f"\nAll results saved to {config.RESULTS_DIR}")
-    print("Step 5 complete.\n")
+    _plot_forward_loss(loss_df)
+    _plot_sector(sector_df)
+    _plot_var_violations(var_bt, {n: ensemble(n)[0] for n in MODELS},
+                         returns_raw, dates, tickers, LABEL, MODELS)
+    _plot_timeseries(ens, fwd, LABEL, MODELS)
+    print(f"\nAll results saved to {R}\nStep 5 complete.\n")
 
 
-# ── Plot functions ─────────────────────────────────────────────────────────────
+# ── Plots ────────────────────────────────────────────────────────────────────────
 
-def _plot_rmse_bar(metrics_df: pd.DataFrame):
-    fig, axes = plt.subplots(1, 4, figsize=(14, 4))
-    metric_cols = ["rmse", "mae", "mape", "qlike"]
-    metric_labels = ["RMSE", "MAE", "MAPE (%)", "QLIKE"]
-
-    for ax, col, label in zip(axes, metric_cols, metric_labels):
-        vals   = metrics_df[col].values
-        models = metrics_df.index.tolist()
-        colors = [COLORS.get(m, "gray") for m in models]
-        bars   = ax.bar(models, vals, color=colors, edgecolor="black", linewidth=0.5)
-        ax.set_title(label)
-        ax.set_xticks(range(len(models)))
-        ax.set_xticklabels(models, rotation=15, ha="right", fontsize=8)
-        for bar, val in zip(bars, vals):
-            ax.text(bar.get_x() + bar.get_width() / 2,
-                    bar.get_height() * 1.01, f"{val:.4f}",
-                    ha="center", va="bottom", fontsize=7)
-
-    fig.suptitle("Model Comparison — Test Set Accuracy Metrics", fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(config.RESULTS_DIR + "plots/accuracy_comparison.png", dpi=150)
-    plt.close(fig)
+def _plot_forward_loss(loss_df):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    for ax, col, err, title in [(axes[0], "FZ0_mean", "FZ0_std", "FZ0 joint (VaR, ES) loss"),
+                                 (axes[1], "pinball_mean", "pinball_std", "Pinball VaR loss")]:
+        models = loss_df.index.tolist()
+        ax.bar(models, loss_df[col], yerr=loss_df[err],
+               color=[COLORS.get(m, "gray") for m in models], capsize=4,
+               edgecolor="black", linewidth=0.5)
+        ax.set_title(title); ax.set_xticklabels(models, rotation=15, ha="right", fontsize=8)
+    fig.suptitle("Forward-looking losses (lower = better) — mean±std over seeds",
+                 fontsize=12, fontweight="bold")
+    fig.tight_layout(); fig.savefig("results/plots/forward_loss.png", dpi=150); plt.close(fig)
 
 
-def _plot_cvar_timeseries(gnn, garch, gjr, targets):
-    # Average CVaR across all stocks per day
-    fig, ax = plt.subplots(figsize=(13, 4))
-
-    ax.plot(targets.mean(axis=1), label="Target CVaR",   color="black",                 linewidth=1.2, alpha=0.8)
-    ax.plot(gnn.mean(axis=1),     label="GNN (GraphSAGE)", color=COLORS["GNN (GraphSAGE)"], linewidth=1.2)
-    ax.plot(garch.mean(axis=1),   label="GARCH(1,1)",    color=COLORS["GARCH(1,1)"],    linewidth=1.0, linestyle="--")
-    ax.plot(gjr.mean(axis=1),     label="GJR-GARCH",     color=COLORS["GJR-GARCH"],     linewidth=1.0, linestyle=":")
-
-    ax.set_title("Average 5-day CVaR (95%) — Test Period", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Date")
-    ax.set_ylabel("CVaR (5-day, 95%)")
-    ax.legend(fontsize=9)
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(config.RESULTS_DIR + "plots/cvar_timeseries.png", dpi=150)
-    plt.close(fig)
-
-
-def _plot_sector_heatmap(sector_df: pd.DataFrame):
-    plot_data = sector_df[["GNN RMSE", "GARCH RMSE", "GJR RMSE"]].copy()
-
+def _plot_sector(sector_df):
+    cols = [c for c in sector_df.columns if c.endswith("FZ0")]
     fig, ax = plt.subplots(figsize=(8, 5))
-    sns.heatmap(
-        plot_data,
-        annot=True, fmt=".4f", cmap="RdYlGn_r",
-        linewidths=0.5, ax=ax, cbar_kws={"label": "RMSE"}
-    )
-    ax.set_title("Sector-level RMSE Comparison", fontsize=12, fontweight="bold")
-    ax.set_xlabel("")
-    fig.tight_layout()
-    fig.savefig(config.RESULTS_DIR + "plots/sector_heatmap.png", dpi=150)
-    plt.close(fig)
+    sns.heatmap(sector_df[cols], annot=True, fmt=".4f", cmap="RdYlGn_r",
+                linewidths=0.5, ax=ax, cbar_kws={"label": "FZ0 loss"})
+    ax.set_title("Sector-level FZ0 loss", fontsize=12, fontweight="bold")
+    fig.tight_layout(); fig.savefig("results/plots/sector_forward_loss.png", dpi=150); plt.close(fig)
 
 
-def _plot_violation_rates(bt_gnn, bt_garch, bt_gjr, tickers):
-    models = {"GNN (GraphSAGE)": bt_gnn, "GARCH(1,1)": bt_garch, "GJR-GARCH": bt_gjr}
+def _plot_var_violations(var_bt, var_ens, returns_raw, dates, tickers, LABEL, models):
     fig, ax = plt.subplots(figsize=(12, 4))
-
-    for name, bt in models.items():
-        rates = [bt["kupiec"][t]["violation_rate"] * 100
-                 for t in tickers if t in bt["kupiec"]]
-        ax.plot(sorted(rates), label=name, linewidth=1.5, color=COLORS.get(name))
-
+    for name in models:
+        vdf = pd.DataFrame(var_ens[name], index=dates, columns=tickers)
+        bt = backtest_model(vdf, returns_raw, horizon=HORIZON, alpha=ALPHA)
+        rates = sorted(bt["kupiec"][t]["violation_rate"] * 100 for t in tickers if t in bt["kupiec"])
+        ax.plot(rates, label=LABEL[name], linewidth=1.5, color=COLORS.get(LABEL[name]))
     ax.axhline(5.0, color="black", linewidth=1.5, linestyle="--", label="Target 5%")
-    ax.set_title("Kupiec Violation Rates by Stock (sorted)", fontsize=12, fontweight="bold")
-    ax.set_xlabel("Stock rank")
-    ax.set_ylabel("Violation rate (%)")
-    ax.legend(fontsize=9)
-    ax.grid(alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(config.RESULTS_DIR + "plots/violation_rates.png", dpi=150)
-    plt.close(fig)
+    ax.set_title("VaR violation rates by stock (sorted)", fontsize=12, fontweight="bold")
+    ax.set_xlabel("Stock rank"); ax.set_ylabel("Violation rate (%)"); ax.legend(fontsize=9)
+    fig.tight_layout(); fig.savefig("results/plots/var_violation_rates.png", dpi=150); plt.close(fig)
 
 
-def _plot_scatter(yt_gnn, yp_gnn, yt_g11, yp_g11, yt_gjr, yp_gjr):
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    datasets = [
-        ("GNN (GraphSAGE)", yt_gnn, yp_gnn, COLORS["GNN (GraphSAGE)"]),
-        ("GARCH(1,1)",      yt_g11, yp_g11, COLORS["GARCH(1,1)"]),
-        ("GJR-GARCH",       yt_gjr, yp_gjr, COLORS["GJR-GARCH"]),
-    ]
-
-    for ax, (name, yt, yp, color) in zip(axes, datasets):
-        mask = np.isfinite(yt) & np.isfinite(yp)
-        # Subsample for speed
-        idx = np.random.choice(mask.sum(), size=min(5000, mask.sum()), replace=False)
-        ax.scatter(yt[mask][idx], yp[mask][idx], alpha=0.2, s=3, color=color)
-        lim = max(np.nanpercentile(yt, 99), np.nanpercentile(yp, 99))
-        ax.plot([0, lim], [0, lim], "k--", linewidth=1)
-        rmse_val = float(np.sqrt(np.mean((yt[mask] - yp[mask])**2)))
-        ax.set_title(f"{name}\nRMSE={rmse_val:.4f}", fontsize=10)
-        ax.set_xlabel("Target CVaR")
-        ax.set_ylabel("Predicted CVaR")
-        ax.set_xlim(0, lim)
-        ax.set_ylim(0, lim)
-        ax.grid(alpha=0.3)
-
-    fig.suptitle("Predicted vs Target CVaR — Test Set", fontsize=12, fontweight="bold")
-    fig.tight_layout()
-    fig.savefig(config.RESULTS_DIR + "plots/scatter_comparison.png", dpi=150)
-    plt.close(fig)
+def _plot_timeseries(ens, fwd, LABEL, models):
+    fig, ax = plt.subplots(figsize=(13, 4))
+    realised_loss = (-fwd).mean(axis=1)
+    ax.plot(realised_loss.index, realised_loss.values, color="black", alpha=0.35,
+            linewidth=0.8, label="Realised mean loss")
+    for name in models:
+        _, e = ens[name]
+        ax.plot(fwd.index, e.mean(axis=1), linewidth=1.1, label=f"{LABEL[name]} ES",
+                color=COLORS.get(LABEL[name]))
+    ax.set_title("Average 5-day 95% ES vs realised loss — test period",
+                 fontsize=12, fontweight="bold")
+    ax.set_xlabel("Date"); ax.set_ylabel("5-day loss"); ax.legend(fontsize=8, ncol=3)
+    fig.tight_layout(); fig.savefig("results/plots/es_timeseries.png", dpi=150); plt.close(fig)
 
 
 if __name__ == "__main__":

@@ -47,31 +47,32 @@ def main():
     print("=" * 60)
     print("Running GARCH(1,1) — our baseline...")
     print("=" * 60)
-    garch_preds_val  = run_garch(returns, str(val_start.date()),  horizon=config.HORIZON)
-    garch_preds_test = run_garch(returns, str(test_start.date()), horizon=config.HORIZON)
+    garch_var_val,  garch_es_val  = run_garch(returns, str(val_start.date()),  horizon=config.HORIZON)
+    garch_var_test, garch_es_test = run_garch(returns, str(test_start.date()), horizon=config.HORIZON)
 
-    garch_preds_val.to_parquet(config.RESULTS_DIR  + "garch_val_predictions.parquet")
-    garch_preds_test.to_parquet(config.RESULTS_DIR + "garch_test_predictions.parquet")
-    print(f"  Saved GARCH predictions → {config.RESULTS_DIR}garch_*_predictions.parquet\n")
+    garch_var_val.to_parquet(config.RESULTS_DIR  + "garch_val_var.parquet")
+    garch_es_val.to_parquet(config.RESULTS_DIR   + "garch_val_es.parquet")
+    garch_var_test.to_parquet(config.RESULTS_DIR + "garch_test_var.parquet")
+    garch_es_test.to_parquet(config.RESULTS_DIR  + "garch_test_es.parquet")
+    print(f"  Saved GARCH VaR/ES → {config.RESULTS_DIR}garch_*_{{var,es}}.parquet\n")
 
     # ── GJR-GARCH(1,1) ─────────────────────────────────────────────────────────
     print("=" * 60)
     print("Running GJR-GARCH(1,1) — Glosten, Jagannathan & Runkle (1993)...")
     print("=" * 60)
-    gjr_preds_val  = run_gjr_garch(returns, str(val_start.date()),  horizon=config.HORIZON)
-    gjr_preds_test = run_gjr_garch(returns, str(test_start.date()), horizon=config.HORIZON)
+    gjr_var_val,  gjr_es_val  = run_gjr_garch(returns, str(val_start.date()),  horizon=config.HORIZON)
+    gjr_var_test, gjr_es_test = run_gjr_garch(returns, str(test_start.date()), horizon=config.HORIZON)
 
-    gjr_preds_val.to_parquet(config.RESULTS_DIR  + "gjr_val_predictions.parquet")
-    gjr_preds_test.to_parquet(config.RESULTS_DIR + "gjr_test_predictions.parquet")
-    print(f"  Saved GJR-GARCH predictions → {config.RESULTS_DIR}gjr_*_predictions.parquet\n")
+    gjr_var_val.to_parquet(config.RESULTS_DIR  + "gjr_val_var.parquet")
+    gjr_es_val.to_parquet(config.RESULTS_DIR   + "gjr_val_es.parquet")
+    gjr_var_test.to_parquet(config.RESULTS_DIR + "gjr_test_var.parquet")
+    gjr_es_test.to_parquet(config.RESULTS_DIR  + "gjr_test_es.parquet")
+    print(f"  Saved GJR-GARCH VaR/ES → {config.RESULTS_DIR}gjr_*_{{var,es}}.parquet\n")
 
     # ── Quick sanity check ────────────────────────────────────────────────────
-    print("── Sanity check (mean predicted CVaR on test set) ───────────────────")
-    print(f"  GARCH    mean CVaR: {garch_preds_test.mean().mean():.4f}")
-    print(f"  GJR-GARCH mean CVaR: {gjr_preds_test.mean().mean():.4f}")
-
-    targets_test = pd.read_parquet(config.RESULTS_DIR + "targets_test.parquet")
-    print(f"  Target   mean CVaR: {targets_test.mean().mean():.4f}")
+    print("── Sanity check (mean predicted VaR / ES on test set) ───────────────")
+    print(f"  GARCH     mean VaR/ES: {garch_var_test.mean().mean():.4f} / {garch_es_test.mean().mean():.4f}")
+    print(f"  GJR-GARCH mean VaR/ES: {gjr_var_test.mean().mean():.4f} / {gjr_es_test.mean().mean():.4f}")
 
     print("\nStep 4 complete.\n")
 

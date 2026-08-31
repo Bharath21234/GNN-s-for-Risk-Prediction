@@ -24,17 +24,20 @@ from scipy.stats import norm
 from tqdm import tqdm
 
 
-# ── CVaR formula for a normal conditional distribution ─────────────────────────
-_Z005       = norm.ppf(0.05)   # ≈ -1.6449
-_PHI_Z005   = norm.pdf(_Z005)  # ≈  0.1031
+# ── VaR / ES formulae for a normal conditional distribution ────────────────────
+_Z005       = norm.ppf(0.05)    # ≈ -1.6449
+_PHI_Z005   = norm.pdf(_Z005)   # ≈  0.1031
+_VAR_SCALE  = -_Z005            # ≈  1.6449  (= 95% VaR of a standard normal)
 _CVAR_SCALE = _PHI_Z005 / 0.05  # ≈  2.0627  (= E[-Z | Z < z_{0.05}])
 
 
+def _parametric_var(sigma_1d: float, horizon: int = 5) -> float:
+    """95% VaR for a normal(0, sigma) daily return, √-time scaled. Positive=loss."""
+    return float(sigma_1d * np.sqrt(horizon) * _VAR_SCALE)
+
+
 def _parametric_cvar(sigma_1d: float, horizon: int = 5) -> float:
-    """
-    CVaR at 95% for a normal(0, sigma_1d) daily return, scaled to `horizon` days.
-    Positive = expected loss.
-    """
+    """95% CVaR/ES for a normal(0, sigma) daily return, √-time scaled. Positive=loss."""
     return float(sigma_1d * np.sqrt(horizon) * _CVAR_SCALE)
 
 
@@ -84,13 +87,15 @@ def run_garch_rolling(
 
     Returns
     -------
-    DataFrame of predicted CVaR, index=dates (test window), columns=tickers
+    (var_df, es_df) : two DataFrames of predicted 95% VaR and ES (CVaR), both
+    positive loss magnitudes; index=dates (test window), columns=tickers.
     """
     test_start_idx = returns.index.searchsorted(pd.Timestamp(test_start_date))
     test_dates     = returns.index[test_start_idx:]
     tickers        = list(returns.columns)
 
-    predictions = pd.DataFrame(index=test_dates, columns=tickers, dtype=float)
+    var_pred = pd.DataFrame(index=test_dates, columns=tickers, dtype=float)
+    es_pred  = pd.DataFrame(index=test_dates, columns=tickers, dtype=float)
 
     for ticker in tqdm(tickers, desc=f"  {model_type} baseline"):
         r     = returns[ticker].values
@@ -119,16 +124,17 @@ def run_garch_rolling(
                     window = r[max(0, t_abs - 252): t_abs]
                     sigma  = float(np.std(window)) if len(window) > 1 else 0.01
 
-            predictions.loc[dates[t_abs], ticker] = _parametric_cvar(sigma, horizon)
+            var_pred.loc[dates[t_abs], ticker] = _parametric_var(sigma, horizon)
+            es_pred.loc[dates[t_abs],  ticker] = _parametric_cvar(sigma, horizon)
 
-    return predictions.astype(float)
+    return var_pred.astype(float), es_pred.astype(float)
 
 
-def run_garch(returns: pd.DataFrame, test_start_date: str, horizon: int = 5) -> pd.DataFrame:
-    """Convenience wrapper for GARCH(1,1)."""
+def run_garch(returns: pd.DataFrame, test_start_date: str, horizon: int = 5):
+    """Convenience wrapper for GARCH(1,1). Returns (var_df, es_df)."""
     return run_garch_rolling(returns, test_start_date, model_type="GARCH", horizon=horizon)
 
 
-def run_gjr_garch(returns: pd.DataFrame, test_start_date: str, horizon: int = 5) -> pd.DataFrame:
-    """Convenience wrapper for GJR-GARCH(1,1)."""
+def run_gjr_garch(returns: pd.DataFrame, test_start_date: str, horizon: int = 5):
+    """Convenience wrapper for GJR-GARCH(1,1). Returns (var_df, es_df)."""
     return run_garch_rolling(returns, test_start_date, model_type="GJR", horizon=horizon)

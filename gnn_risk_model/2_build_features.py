@@ -43,8 +43,8 @@ def main():
     print(f"  Dates : {returns.index[0].date()} → {returns.index[-1].date()}")
 
     # ── Build features and targets ─────────────────────────────────────────────
-    print("\nBuilding features and CVaR targets...")
-    features, targets, dates = build_dataset(
+    print("\nBuilding features, CVaR targets and forward returns...")
+    features, targets, fwd_returns, dates = build_dataset(
         returns     = returns,
         spy_returns = spy_ret,
         vix         = vix,
@@ -56,7 +56,8 @@ def main():
         verbose     = True,
     )
     print(f"  Feature shape : {features.shape}   (T, N, F)")
-    print(f"  Target shape  : {targets.shape}    (T, N)")
+    print(f"  Target shape  : {targets.shape}    (T, N)  [rolling CVaR, reconstruction]")
+    print(f"  Fwd-return    : {fwd_returns.shape}    (T, N)  [realised {config.HORIZON}-day, primary]")
 
     # ── Train / val / test split ───────────────────────────────────────────────
     train_mask = dates <= config.TRAIN_END
@@ -67,12 +68,22 @@ def main():
     val_indices   = np.where(val_mask)[0]
     test_indices  = np.where(test_mask)[0]
 
-    print(f"\n  Train: {train_mask.sum()} days  "
-          f"({dates[train_mask][0].date()} → {dates[train_mask][-1].date()})")
-    print(f"  Val  : {val_mask.sum()} days  "
-          f"({dates[val_mask][0].date()} → {dates[val_mask][-1].date()})")
-    print(f"  Test : {test_mask.sum()} days  "
-          f"({dates[test_mask][0].date()} → {dates[test_mask][-1].date()})")
+    # Drop the last HORIZON-1 days of each split so no realised forward window
+    # crosses a split boundary or runs off the end of the series (no leakage,
+    # no NaN forward labels).  ~4 days per split — negligible.
+    h = config.HORIZON
+    def _trim(idx):
+        return idx[:-(h - 1)] if h > 1 and len(idx) > (h - 1) else idx
+    train_indices = _trim(train_indices)
+    val_indices   = _trim(val_indices)
+    test_indices  = _trim(test_indices)
+
+    print(f"\n  Train: {len(train_indices)} days  "
+          f"({dates[train_indices][0].date()} → {dates[train_indices][-1].date()})")
+    print(f"  Val  : {len(val_indices)} days  "
+          f"({dates[val_indices][0].date()} → {dates[val_indices][-1].date()})")
+    print(f"  Test : {len(test_indices)} days  "
+          f"({dates[test_indices][0].date()} → {dates[test_indices][-1].date()})")
 
     # ── Normalize features (fit on train only) ─────────────────────────────────
     print("\nNormalising features...")
@@ -97,6 +108,7 @@ def main():
 
     np.save(config.DATA_DIR + "processed/features.npy",      features_norm)
     np.save(config.DATA_DIR + "processed/targets.npy",       targets)
+    np.save(config.DATA_DIR + "processed/fwd_returns.npy",   fwd_returns)
     np.save(config.DATA_DIR + "processed/feat_mean.npy",     feat_mean)
     np.save(config.DATA_DIR + "processed/feat_std.npy",      feat_std)
     np.save(config.DATA_DIR + "processed/train_indices.npy", train_indices)

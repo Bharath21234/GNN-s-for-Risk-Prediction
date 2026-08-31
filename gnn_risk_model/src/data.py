@@ -184,6 +184,28 @@ def compute_cvar_target(
     return (cvar * np.sqrt(horizon)).astype(np.float32)
 
 
+def compute_forward_returns(
+    returns: pd.DataFrame,
+    horizon: int = 5,
+) -> np.ndarray:
+    """
+    Realised cumulative `horizon`-day forward log return for every (t, stock).
+
+    fwd[t, i] = sum(returns[t : t+horizon, i])   (negative = a forward loss)
+
+    The final `horizon-1` rows have no full forward window and are set to NaN.
+    This is the *forward-looking* label used for FZ0/pinball training and
+    evaluation (contrast with the backward-looking rolling CVaR target).
+    """
+    vals = returns.values                       # (T, N)
+    T, N = vals.shape
+    fwd = np.full((T, N), np.nan, dtype=np.float32)
+    for t in range(T):
+        if t + horizon <= T:
+            fwd[t] = vals[t: t + horizon].sum(axis=0)
+    return fwd
+
+
 def build_dataset(
     returns: pd.DataFrame,
     spy_returns: pd.Series,
@@ -194,15 +216,18 @@ def build_dataset(
     alpha: float = 0.95,
     horizon: int = 5,
     verbose: bool = True,
-) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.DatetimeIndex]:
     """
-    Build the full feature and target dataset across all valid time steps.
+    Build features, the backward-looking rolling-CVaR target (secondary
+    reconstruction metric), and the forward-looking realised return label
+    (primary training/evaluation signal), across all valid time steps.
 
     Returns
     -------
-    features : (T, N, F)
-    targets  : (T, N)
-    dates    : DatetimeIndex of length T
+    features    : (T, N, F)
+    targets     : (T, N)      backward-looking rolling CVaR (reconstruction only)
+    fwd_returns : (T, N)      realised horizon-day forward return (NaN if run off)
+    dates       : DatetimeIndex of length T
     """
     T = len(returns)
     N = len(returns.columns)
@@ -224,8 +249,11 @@ def build_dataset(
         )
         targets[idx] = compute_cvar_target(returns, t, lookback, alpha, horizon)
 
+    fwd_all = compute_forward_returns(returns, horizon)   # (T, N)
+    fwd_returns = fwd_all[valid_start:]                   # (T_valid, N)
+
     dates = returns.index[valid_start:]
-    return features, targets, dates
+    return features, targets, fwd_returns, dates
 
 
 def normalize_features(

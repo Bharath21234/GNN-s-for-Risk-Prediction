@@ -82,15 +82,20 @@ def build_graph_snapshot(
     sectors: dict[str, str],
     corr_window: int = 60,
     corr_threshold: float = 0.4,
+    graph_variant: str = "combined",
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Combine sector edges and correlation edges into one edge_index.
-    Also compute edge weights (correlation) for all edges.
+    Build an edge_index (with correlation edge weights) for time step t.
+
+    graph_variant:
+      "combined"    — intra-sector edges + cross-sector correlation edges (default)
+      "sector"      — intra-sector edges only
+      "correlation" — cross-sector correlation edges only
 
     Returns
     -------
     edge_index : (2, E)
-    edge_attr  : (E,)  correlation values; sector edges get their computed corr
+    edge_attr  : (E,)  correlation values (sector edges get their computed corr)
     """
     N = len(tickers)
 
@@ -102,31 +107,32 @@ def build_graph_snapshot(
     else:
         corr_matrix = np.eye(N)
 
-    # 1. Intra-sector edges (always present)
+    # 1. Intra-sector edges
     sector_ei = build_sector_edge_index(tickers, sectors)
-
-    # Weights for sector edges
     sector_weights = []
     for e in range(sector_ei.shape[1]):
         a, b = sector_ei[0, e], sector_ei[1, e]
         c = corr_matrix[a, b]
         sector_weights.append(float(c) if np.isfinite(c) else 1.0)
+    sector_weights = np.array(sector_weights, dtype=np.float32)
 
     # 2. Cross-sector correlation edges
     cross_ei, cross_weights = build_correlation_edges(
         returns, t, tickers, sectors, corr_window, corr_threshold
     )
 
-    # Merge
+    if graph_variant == "sector":
+        return sector_ei.astype(np.int64), sector_weights
+    if graph_variant == "correlation":
+        return cross_ei.astype(np.int64), cross_weights
+
+    # combined (default)
     if cross_ei.shape[1] > 0:
         edge_index = np.concatenate([sector_ei, cross_ei], axis=1)
-        edge_attr  = np.concatenate([
-            np.array(sector_weights, dtype=np.float32),
-            cross_weights,
-        ])
+        edge_attr  = np.concatenate([sector_weights, cross_weights])
     else:
         edge_index = sector_ei
-        edge_attr  = np.array(sector_weights, dtype=np.float32)
+        edge_attr  = sector_weights
 
     return edge_index.astype(np.int64), edge_attr
 
@@ -154,10 +160,22 @@ def precompute_edge_indices(
     corr_window: int = 60,
     corr_threshold: float = 0.4,
     update_freq: int = 21,
+    graph_variant: str = "combined",
+    vix: pd.Series | None = None,
+    vix_trigger_pct: float = 0.20,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """
     Pre-compute graph topology for each time step, only rebuilding every
     `update_freq` days (monthly by default) for CPU efficiency.
+
+    If `vix` is given (same index/length as `returns`), the graph is also
+    rebuilt early whenever VIX has moved by more than `vix_trigger_pct`
+    (relative) since the last rebuild. A trailing correlation graph refreshed
+    on a fixed calendar cadence is stale exactly when it matters most:
+    dependence structure across stocks breaks fastest during volatility
+    spikes, which a purely calendar-based refresh can miss for weeks. This is
+    a no-op (identical to the calendar-only behaviour) when `vix` is None, so
+    it is backward compatible with existing snapshots/experiments.
 
     Returns list of (edge_index, edge_attr) tuples, one per time step.
     """
@@ -165,13 +183,23 @@ def precompute_edge_indices(
     lookback = len(returns) - T
     edge_snapshots = []
     current_ei, current_ea = None, None
+    last_rebuild_vix = None
 
     for idx in range(T):
-        if idx % update_freq == 0:
-            t = lookback + idx
+        t = lookback + idx
+        due_calendar = (idx % update_freq == 0)
+        due_vix = False
+        if vix is not None and last_rebuild_vix is not None and t < len(vix):
+            v = float(vix.iloc[t])
+            if last_rebuild_vix > 0 and abs(v - last_rebuild_vix) / last_rebuild_vix >= vix_trigger_pct:
+                due_vix = True
+        if due_calendar or due_vix or current_ei is None:
             current_ei, current_ea = build_graph_snapshot(
-                returns, t, tickers, sectors, corr_window, corr_threshold
+                returns, t, tickers, sectors, corr_window, corr_threshold,
+                graph_variant=graph_variant,
             )
+            if vix is not None and t < len(vix):
+                last_rebuild_vix = float(vix.iloc[t])
         edge_snapshots.append((current_ei, current_ea))
 
     return edge_snapshots

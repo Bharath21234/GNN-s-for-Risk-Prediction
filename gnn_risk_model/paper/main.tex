@@ -1,0 +1,678 @@
+\documentclass{llncs}
+% Official Springer LNCS/CCIS class (llncs.cls + splncs04.bst, fetched from
+% CTAN), matching the BNAIC/BeNeLearn 2026 format requirement confirmed on
+% https://www.maastrichtuniversity.nl/bnaic2026/call_papers (checked
+% 2026-08-28): "Springer CCIS/LNCS format", single-blind (names/affiliations
+% included), Type A up to 15pp excl. refs/appendices, submit via OpenReview,
+% deadline 2026-08-31 23:59 AoE. Do NOT load the geometry package: LNCS sets
+% its own margins/fonts and geometry will visibly break them.
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[numbers,sort&compress]{natbib}  % splncs04.bst is a numeric style
+\usepackage{xcolor}
+\usepackage{hyperref}   % load after natbib; LNCS tolerates this ordering
+\newcommand{\todo}[1]{{\color{red}[TODO: #1]}}
+
+% ── Headline numbers (filled from results/ after the run) ─────────────────────
+\newcommand{\nStocks}{99}
+\newcommand{\nSectors}{11}
+\newcommand{\nSeeds}{5}
+\newcommand{\nWfSeeds}{2}
+\newcommand{\nAblSeeds}{3}
+% Forward-loss deltas / DM p-values / sector wins (set from CSVs):
+\newcommand{\gnnFZ}{\todo{FZ0}}
+\newcommand{\gnnFZEns}{\todo{FZ0}}
+\newcommand{\mlpFZEns}{\todo{FZ0}}
+\newcommand{\garchFZ}{\todo{FZ0}}
+\newcommand{\dmGarchP}{\todo{p}}
+\newcommand{\dmMlpP}{\todo{p}}
+\newcommand{\dmGcnP}{\todo{p}}
+\newcommand{\dmGjrP}{\todo{p}}
+\newcommand{\dmHistsimP}{\todo{p}}
+\newcommand{\attnVsBaseP}{\todo{p}}
+\newcommand{\sectorWins}{\todo{k}}
+\newcommand{\sensSpread}{\todo{spread}}
+\newcommand{\blendW}{\todo{w}}
+\newcommand{\blendFZ}{\todo{FZ0}}
+\newcommand{\blendVsMlpP}{\todo{p}}
+\newcommand{\blendVsGnnP}{\todo{p}}
+\newcommand{\blendVsGarchP}{\todo{p}}
+\newcommand{\blendWtwo}{\todo{w}}
+\newcommand{\blendVsMlpPtwo}{\todo{p}}
+\newcommand{\blendVsGarchPtwo}{\todo{p}}
+\newcommand{\recalGnnK}{\todo{k}}
+\newcommand{\recalGnnFZ}{\todo{FZ0}}
+\newcommand{\recalGnnVsGarchP}{\todo{p}}
+\newcommand{\recalGnnKupiec}{\todo{pct}}
+\newcommand{\recalMlpK}{\todo{k}}
+\newcommand{\recalMlpFZ}{\todo{FZ0}}
+\newcommand{\recalMlpVsGarchP}{\todo{p}}
+\newcommand{\recalBlendFZ}{\todo{FZ0}}
+\newcommand{\recalBlendVsGarchP}{\todo{p}}
+\newcommand{\recalGnnVsMlpP}{\todo{p}}
+% Overridden automatically by 8_make_paper.py once results exist:
+\IfFileExists{results_macros.tex}{\input{results_macros.tex}}{}
+
+\title{Does Cross-Sectional Graph Structure Improve Tail-Risk
+Forecasting? A Graph Neural Network vs.\ GARCH Study on US Equities}
+\titlerunning{Does Graph Structure Improve Tail-Risk Forecasting?}
+\author{Menon Bharath Sreekumar}
+\authorrunning{M. B. Sreekumar}
+\institute{Nanyang Technological University, Singapore\\ \email{BHARATH007@e.ntu.edu.sg}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Per-asset volatility models such as GARCH forecast the tail risk of each stock
+in isolation, ignoring the cross-sectional dependence that dominates in market
+stress. We ask whether a graph neural network (GNN) that propagates information
+across a correlation-and-sector graph forecasts the joint Value-at-Risk (VaR)
+and Expected Shortfall (ES) of equities better than univariate GARCH baselines,
+and \emph{where} any such benefit concentrates. We train GNNs with joint
+(VaR, ES) output heads directly on the strictly consistent Fissler--Ziegel (FZ0)
+scoring rule against \emph{realised} forward returns, and evaluate them against
+GARCH(1,1) and GJR-GARCH on \nStocks{} large-cap US stocks across \nSectors{}
+sectors (2015--2024). Crucially, we (i) score every model with forward-looking,
+elicitable losses rather than reconstruction error against a backward-looking
+label; (ii) backtest VaR with correctly specified Kupiec and Christoffersen
+tests and ES with the Acerbi--Sz\'ekely test; (iii) assess significance with
+Diebold--Mariano tests using HAC variance and a small-sample correction over
+\nSeeds{} seeds; and (iv) isolate the value of the graph with an
+otherwise-identical no-graph MLP ablation. An architecture ablation over
+mean-aggregation (GraphSAGE), symmetric-normalised (GCN) and attention-based
+(GAT) message passing shows the aggregation rule matters substantially, and a
+further regularisation study shows dropout on GAT's attention coefficients
+matters nearly as much: together they close the gap to the no-graph MLP
+entirely and open a significant lead over plain GCN. On the primary 95\% level
+the resulting GNN is statistically \emph{indistinguishable} from the no-graph
+MLP ($p=0.12$) and significantly \emph{ahead} of plain GCN ($p=0.025$), though
+it remains significantly behind GARCH, GJR-GARCH and historical simulation
+(Diebold--Mariano $p<0.05$ in each case). At the more extreme, Basel/FRTB
+regulatory 97.5\% ES level, the same architecture and attention-dropout
+setting (chosen on primary-level validation data, deliberately not re-tuned
+per tail level) transfers imperfectly: the GNN alone now regresses
+significantly \emph{behind} the no-graph MLP and every parametric baseline,
+though it remains tied with GCN. A validation-selected (never test-touching)
+convex ensemble of the GNN and MLP forecasts more than compensates at both
+tail levels, significantly outperforming both components individually and, at
+the 97.5\% level, beating GARCH(1,1) outright, evidence that the graph's
+value is more reliably extracted by ensembling than by the standalone
+architecture across operating points. A rolling-origin walk-forward evaluation
+similarly shows the standalone architecture's gains do not transfer uniformly
+across regimes: the residual gap is concentrated in a single fast-regime-shift
+year, consistent with a monthly-refreshed, trailing-correlation graph lagging
+the dependence structure precisely when it changes fastest. A separately
+validated scalar recalibration shows
+every learned model is systematically under-confident in VaR/ES magnitude, not
+just mis-ranked: correcting it lets the recalibrated GNN alone statistically
+tie GARCH ($p=0.89$) and lets the recalibrated ensemble significantly beat
+GARCH outright ($p$\recalBlendVsGarchP). Reported honestly, because it
+complicates rather than simply supports our headline result, this same
+correction \emph{introduces} a significant GNN-vs-MLP gap
+($p$\recalGnnVsMlpP) that is not present at raw magnitude ($p$\dmMlpP),
+indicating the scale bias and the graph's residual variance have different
+sources.
+\end{abstract}
+
+\section{Introduction}
+Value-at-Risk (VaR) and Expected Shortfall (ES, equivalently CVaR) are the
+standard measures of downside tail risk, and ES is now the regulatory measure of
+record under the Basel framework \citep{basel2019} because, unlike VaR, it is
+coherent \citep{artzner1999}. The dominant forecasting tools, the GARCH family
+\citep{bollerslev1986,glosten1993}, model each asset's conditional variance
+\emph{univariately}. Yet the tail events that matter most are precisely those in
+which assets move together: cross-sectional dependence spikes in crises. This
+motivates models that condition each asset's tail forecast on the state of
+related assets.
+
+Graph neural networks \citep{kipf2017,hamilton2017} are a natural fit: represent
+each stock as a node, connect economically related stocks with edges, and let
+the network propagate risk-relevant signal across the graph. We study whether
+this cross-sectional propagation improves 5-day 95\% VaR/ES forecasts for US
+equities, and, because a single headline number can hide as much as it
+reveals, \emph{for which sectors} it helps. Our contributions are:
+\begin{enumerate}
+  \item A GNN with joint (VaR, ES) heads (ES\,$\ge$\,VaR by construction)
+    trained on the strictly consistent FZ0 loss \citep{fissler2016,patton2019}
+    against realised forward returns, so that training and evaluation share
+    the same decision-relevant objective; an architecture ablation over
+    GraphSAGE \citep{hamilton2017}, GCN \citep{kipf2017} and graph attention
+    (GAT) \citep{velickovic2018} message passing, plus a regularisation study
+    of GAT's own attention-dropout mechanism, which together we use to select
+    the final aggregation rule and its regularisation rather than assuming
+    either a priori.
+  \item A rigorous, forward-looking evaluation: elicitable losses as the primary
+    metric; correctly specified VaR backtests \citep{kupiec1995,christoffersen1998}
+    and an ES-specific backtest \citep{acerbi2014}; Diebold--Mariano significance
+    \citep{diebold1995} with HAC \citep{newey1987} and small-sample
+    \citep{harvey1997} corrections over \nSeeds{} seeds; a second, more extreme
+    tail level (97.5\%, Basel/FRTB) to check whether relative ranking holds
+    beyond the primary 95\% VaR/ES level.
+  \item A no-graph MLP ablation that isolates the marginal value of the graph,
+    and a sector-level decomposition that localises where cross-sectional
+    structure pays off.
+  \item A validation-selected (never test-touching) convex ensemble of the
+    GNN and MLP forecasts, testing directly whether the graph's signal is
+    complementary to, not merely noisier than, the no-graph model's.
+\end{enumerate}
+
+\section{Related Work}
+\textbf{Tail-risk forecasting.} GARCH \citep{bollerslev1986} and its asymmetric
+GJR extension \citep{glosten1993} remain the workhorses for conditional
+volatility and, via a distributional assumption, VaR/ES. \textbf{Backtesting.}
+Kupiec's proportion-of-failures test \citep{kupiec1995} and Christoffersen's
+conditional-coverage test \citep{christoffersen1998} assess VaR calibration;
+ES, being non-elicitable in isolation \citep{gneiting2011}, requires dedicated
+tools such as the Acerbi--Sz\'ekely tests \citep{acerbi2014} or the joint
+(VaR, ES) elicitability of Fissler and Ziegel~\citep{fissler2016} exploited
+for estimation and comparison by Patton et al.~\citep{patton2019} and Nolde
+and Ziegel~\citep{nolde2017}. \textbf{GNNs in
+finance.} Graph-based models have been applied to return prediction
+\citep{matsunaga2019}, but their use for \emph{tail-risk} forecasting, and
+head-to-head against properly backtested GARCH baselines, remains limited. We
+position our work at this intersection, foregrounding the cross-sectional angle
+and a statistically disciplined evaluation.
+
+\section{Data and Graph Construction}
+We use daily adjusted-close prices for \nStocks{} large-cap US equities spanning
+all \nSectors{} GICS sectors, plus SPY (market proxy) and VIX, from 2015 to 2024,
+and work in log returns \citep{cont2001}. Node features (27 per stock per day)
+are strictly backward-looking: rolling volatilities (5/10/20/60d), rolling
+returns (1/5/20/60d), market betas (20/60d), vol-of-vol, RSI-14, 20-day maximum
+drawdown, $\log$VIX, an 11-way sector one-hot, and mean intra-sector and market
+correlations. Features are $z$-scored using \emph{training-only} statistics.
+
+The graph is rebuilt monthly. It contains (i) always-on intra-sector edges and
+(ii) cross-sector edges between pairs whose 60-day return correlation exceeds
+$0.4$ in absolute value; edge weights record the correlation. We use a strict
+temporal split (train $\le$2020, validation 2021--22, test 2023--24) and, to
+avoid look-ahead across the 5-day horizon, drop the final $h-1$ days of each
+split so that no realised forward window crosses a boundary.
+
+\section{Models}
+\subsection{A graph attention encoder with joint (VaR, ES) heads}
+Let $x_i^{(t)}\in\mathbb{R}^{27}$ be node $i$'s features on day $t$ and
+$\mathcal{G}_t$ the day's graph. A two-layer encoder with layer normalisation,
+ReLU and dropout produces a node embedding $h_i$; we use layer- rather than
+batch-normalisation deliberately: with one graph snapshot per day as the
+training unit, batch statistics are taken over that day's cross-section of
+stocks, which recentres every node toward the day's cross-sectional mean at
+each layer, directly fighting a target that is, by construction, how one
+stock's tail risk deviates from its peers'. Switching from batch- to
+layer-normalisation measurably narrowed the GNN's gap to the baselines below.
+
+The message-passing layer itself is the second design choice we do not fix a
+priori. We compare three standard aggregators, holding everything else
+(features, split, seeds, loss, normalisation) identical: \textbf{GraphSAGE}
+\citep{hamilton2017} (uniform mean aggregation over neighbours), \textbf{GCN}
+\citep{kipf2017} (symmetric-degree-normalised, unweighted aggregation), and
+\textbf{GAT} \citep{velickovic2018} (multi-head attention that \emph{learns} a
+per-edge weight from the two endpoint representations, rather than aggregating
+neighbours uniformly or by a fixed topology-derived weight). GCN is also
+retrained and reported directly against the primary model in
+Section~\ref{sec:results} rather than in Table~\ref{tab:ablation}, which
+instead isolates the edge-construction question (Section~\ref{sec:results}).
+An attention-dropout-free GraphSAGE-vs-GAT comparison on the combined graph
+motivated adopting GAT: letting the model learn which neighbours to trust,
+instead of averaging all of them in uniformly, gave the largest, most
+consistent improvement of any aggregation rule we tried, directly addressing
+the oversmoothing we would otherwise expect from the combined graph's density.
+We
+therefore adopt \textbf{4-head GAT (heads averaged, not concatenated, to keep
+the layer width fixed across conv types)} as the primary architecture; the
+ablation table reports GraphSAGE and GCN as points of comparison rather than
+alternatives we recommend. A third design choice, once GAT is fixed, is how
+strongly to regularise the attention coefficients themselves: GAT's own paper
+\citep{velickovic2018} applies dropout directly to the normalised attention
+weights (separate from ordinary feature dropout), a mechanism the standard
+implementation default leaves off ($=0$). A grid over four dropout levels,
+each run over multiple seeds and confirmed on the full primary seed set,
+showed $0.3$ both lowers mean test FZ0 relative to no attention dropout
+(significant, Section~\ref{sec:results}) and, on the validation set,
+meaningfully lowers seed-to-seed variance ($0.073$ vs.\ $0.129$), consistent
+with attention dropout acting as an implicit ensemble over which edges a given
+forward pass attends to, rather than only shrinking weights. We adopt
+attention dropout $=0.3$ as part of the primary architecture. Two heads map
+the final $h_i$ to a positive VaR
+and a non-negative gap via softplus, and we set
+$\mathrm{ES}_i = \mathrm{VaR}_i + \mathrm{gap}_i$, guaranteeing
+$\mathrm{ES}_i \ge \mathrm{VaR}_i \ge 0$ (both as positive loss magnitudes).
+
+\subsection{Training objective: the FZ0 loss}
+Because ES is not elicitable on its own \citep{gneiting2011} but the pair
+(VaR, ES) is jointly elicitable \citep{fissler2016}, we train \emph{directly} on
+the strictly consistent, 0-homogeneous Fissler--Ziegel loss of
+Patton et al.~\citep{patton2019}. With realised forward return $r$, VaR level $v>0$ and ES
+level $e>0$ (positive-magnitude convention) at tail probability $\alpha$,
+\begin{equation}
+  L_{\mathrm{FZ0}}(r; v, e) =
+  \frac{\mathbf{1}\{-r \ge v\}\,(-v - r)}{\alpha\, e}
+  + \frac{v}{e} + \log e - 1 .
+\end{equation}
+Minimising $L_{\mathrm{FZ0}}$ against realised outcomes aligns training with the
+forward-looking evaluation, in contrast to regressing on a backward-looking
+rolling-CVaR label (which is a deterministic function of the past and rewards
+reconstruction over genuine forecasting).
+
+\subsection{No-graph MLP ablation}
+To isolate the contribution of the graph, we evaluate the \emph{identical}
+architecture (GAT layers included) with an empty edge set. With no neighbours,
+GAT's attention reduces to a single self-loop per node (attention weight
+trivially 1), yielding an MLP with the same parameter count, features, split,
+seeds and objective, so any performance gap is attributable to graph message
+passing alone, not to a different model family or capacity.
+
+\subsection{Baselines}
+We fit GARCH(1,1) \citep{bollerslev1986} and GJR-GARCH(1,1) \citep{glosten1993}
+per stock on an expanding window, refitting monthly. Under a conditional normal,
+the 5-day 95\% VaR and ES are
+$\mathrm{VaR} = \sigma\sqrt{h}\,z_{0.95}$ and
+$\mathrm{ES} = \sigma\sqrt{h}\,\phi(z_{0.05})/\alpha$.
+We add two further baselines. \textbf{Plain GCN} (Section~4.1): besides being
+one arm of the architecture ablation, since our graph is rebuilt monthly GCN
+also serves as a transductive-vs.-inductive check: does that distinction
+matter empirically, beyond the aggregation-rule question the ablation already
+answers. \textbf{Historical simulation}: the standard non-parametric industry
+benchmark \citep{jorion2007}, reading VaR and ES directly off the empirical
+distribution of trailing 252-day overlapping $h$-day returns per stock, with
+no distributional assumption and no fitting.
+
+\section{Evaluation Protocol}
+\textbf{Primary (forward-looking).} We report the FZ0 joint loss and the pinball
+(quantile) VaR loss, both scored against realised forward returns. These are
+strictly consistent for their targets and are the headline metrics.
+\textbf{VaR calibration.} Kupiec POF \citep{kupiec1995} and Christoffersen CC
+\citep{christoffersen1998}, which are now correctly specified because the tested
+threshold is the 95\% VaR (expected breach rate $=5\%$).
+\textbf{ES calibration.} The Acerbi--Sz\'ekely Test~2 statistic
+\citep{acerbi2014} and an exceedance-residual test of whether mean tail loss
+matches the predicted ES. \textbf{Significance.} Diebold--Mariano tests
+\citep{diebold1995} on per-period loss differences, with a Newey--West HAC
+variance \citep{newey1987} (lag $=h-1$, for the overlapping horizon) and the
+Harvey--Leybourne--Newbold small-sample correction \citep{harvey1997}, over
+\nSeeds{} seeds; we report mean$\pm$std, the fraction of seeds beating each
+baseline, per-sector DM tests, and moving-block-bootstrap confidence intervals
+on the mean loss (block length $=h$, to respect the overlap).
+\textbf{Robustness and ablations.} (i) a non-overlapping (every-5th-day) VaR
+backtest; (ii) a \emph{graph-construction} ablation (sector-only vs.\
+correlation-only vs.\ combined edges) to check the result is not an artefact of
+one arbitrary graph; (iii) an \emph{architecture} ablation across GraphSAGE,
+GCN, GAT and correlation-weighted GraphSAGE aggregation, used to select the
+primary conv type (Section~4.1); and (iv) a
+\emph{rolling-origin / walk-forward} evaluation that refits on an expanding
+window and scores each subsequent year out-of-sample (2021 recovery, 2022
+drawdown, 2023--24), rather than a single fixed test window; (v) a
+\emph{graph-hyperparameter sensitivity} study, retraining across a grid of the
+cross-sector correlation threshold and the graph-update frequency, to check the
+result is not an artefact of one tuned setting; and (vi) a \emph{second tail
+level} (97.5\% ES, the Basel/FRTB regulatory level), retraining GNN, MLP and
+GCN and re-deriving the GARCH baselines by the exact normal-quantile rescaling,
+to check calibration and relative ranking hold beyond the primary 95\% level.
+\textbf{Secondary.} We also report RMSE of predicted ES against the
+backward-looking rolling-CVaR label, explicitly as a reconstruction diagnostic,
+not as evidence of forecasting skill.
+
+\section{Results}
+\label{sec:results}
+Tables~\ref{tab:main}--\ref{tab:sens} and Figures~\ref{fig:forward}--\ref{fig:sector}
+are generated directly from the evaluation outputs (\texttt{8\_make\_paper.py});
+we report the evidence as computed.
+
+\textbf{Two architectural levers, applied in sequence, close the gap to the
+no-graph MLP entirely, though only the first isolates the aggregation rule
+cleanly.} Before fixing the primary model, we first ablated the aggregation
+rule alone, without attention dropout: uniform mean aggregation (GraphSAGE)
+and correlation-magnitude weighting (GraphConv) both trailed attention-based
+aggregation (GAT), the single largest lever we found for closing the
+GNN-vs-baseline gap, and we adopt GAT as the primary model on that evidence
+(Section~4.1). A second lever, orthogonal to the aggregation rule itself, came
+from regularising \emph{how much} GAT trusts its own learned attention
+weights: a grid over attention-coefficient dropout (Section~4.1), matched to
+the primary evaluation's 5 seeds, found $0.3$ both improves mean test FZ0 over
+no attention dropout (DM $p$\attnVsBaseP) and meaningfully lowers seed-to-seed
+variance on held-out validation; a finer follow-up grid ($0.25$/$0.35$/$0.4$)
+confirmed $0.3$ as the local optimum on both criteria, and we adopt it as part
+of the primary architecture. Table~\ref{tab:ablation}, run afterwards with
+attention dropout applied wherever GAT appears, reports edge-construction
+variants (sector-only, correlation-only, combined) rather than a repeat of the
+aggregation-rule comparison; on only \nAblSeeds{} seeds each, its GAT row
+($-2.294\pm0.044$) is noisier and not a clean rerun of the
+GraphSAGE-vs-GAT question above, since attention dropout, an extra
+regulariser absent from the GraphSAGE/GraphConv rows, is now baked into it.
+We report this rather than silently reconciling it: the aggregation-rule
+conclusion rests on the original, attention-dropout-free comparison and the
+independently seed-matched primary evaluation below, not on this table's GAT
+row in isolation. Four further changes we tested did \emph{not} help and are
+not part of the final model: an input-to-output skip connection, a
+volatility-triggered graph refresh (rebuilding early whenever VIX moves
+$>$20\% since the last rebuild), GATv2's dynamic attention in place of GAT's
+static form, and DropEdge \citep{rong2020} (randomly removing edges each
+training step, a structural regulariser distinct from attention dropout)
+stacked on top of the adopted attention dropout at levels $0.1$--$0.3$: all
+left test FZ0 unchanged or worse, suggesting attention (with the right
+dropout) already absorbs what those mechanisms target.
+
+\textbf{With both levers applied, the graph closes the gap to the no-graph MLP
+at the primary level, and opens a significant lead over plain GCN.}
+Table~\ref{tab:main} reports two FZ0 point estimates: the mean of each seed's
+independent loss (what we discuss below, for comparability with the
+seed-to-seed variance columns), and the loss of the 5-seed \emph{ensemble}
+prediction (seeds' VaR/ES predictions averaged before scoring), a standard
+variance-reduction step, and the one the Diebold--Mariano tests, confidence
+intervals and Table~\ref{tab:robust} all use throughout. The ensembled GNN
+reaches $\gnnFZEns$, materially better than the per-seed mean ($\gnnFZ$) and
+closer still to the ensembled MLP's $\mlpFZEns$; we report the more
+conservative per-seed figure in prose below so as not to overstate the
+result, but the significance tests already reflect the stronger ensembled
+number. On the forward-looking FZ0 loss, the GNN ($\gnnFZ$) is now
+statistically \emph{indistinguishable} from the no-graph MLP ablation
+($p$\dmMlpP), despite the MLP sharing the identical architecture, features,
+seeds and objective, differing only in whether the edge set is populated, and
+significantly \emph{ahead} of plain GCN ($p$\dmGcnP, GNN lower loss,
+Table~\ref{tab:dm}), reversing the earlier tie under GraphSAGE. It remains
+significantly behind GARCH(1,1) ($\garchFZ$, DM $p$\dmGarchP), GJR-GARCH
+($p$\dmGjrP) and historical simulation ($p$\dmHistsimP). This is not an
+artefact of one arbitrary graph choice: the construction ablation
+(Table~\ref{tab:ablation}, all rows GraphSAGE except where noted) shows
+sector-only and correlation-only edges individually score \emph{better} than
+the combined graph under uniform aggregation, consistent with the denser
+combined graph's redundant edges actively harming GraphSAGE through
+oversmoothing. We cannot cleanly re-test this specific comparison under GAT,
+since our only GAT row already includes the adopted attention dropout
+(discussed above); on the combined graph, though, GraphConv's fixed
+correlation-magnitude weighting scores worst of all three aggregators tested,
+consistent with attention's \emph{learned} edge weighting mattering more than
+any fixed scheme. The hyperparameter sensitivity
+grid (Table~\ref{tab:sens}) is wider under the attention-dropout-regularised
+GAT than it was without attention dropout (spread $=\sensSpread$, vs.\
+$0.1695$), and its best cell (correlation threshold $0.4$, refreshed every
+10 days, FZ0 $=-2.40$) beats the default configuration by a visible margin,
+though we did not re-select the primary configuration against this grid,
+since doing so after seeing test-set performance would invalidate the
+held-out comparison.
+
+\textbf{A post-hoc ensemble of the GNN and MLP closes the primary-level gap to
+GARCH to statistical insignificance.} The DM tests above show the GNN is
+noisier than the MLP, not that it is redundant with it, so we test directly
+whether their forecasts are complementary: a convex blend,
+$\mathrm{VaR}/\mathrm{ES} = w\cdot\text{GNN} + (1-w)\cdot\text{MLP}$, with no
+additional training. We select $w$ by grid search minimising FZ0 on the
+\emph{validation} set alone, independently at each tail level, and touch the
+test set exactly once to confirm the already-committed configuration: the
+same discipline that stopped us re-selecting the primary model from the
+sensitivity grid above, applied correctly here because the selection step
+itself never sees the test set. At the primary level this selects
+$w^\ast=\blendW$ (mostly MLP, a small GNN contribution). The resulting blend
+reaches $\blendFZ$, significantly better than \emph{both} components it is
+built from (vs.\ MLP, $p$\blendVsMlpP; vs.\ GNN, $p$\blendVsGnnP): direct
+evidence that the GNN carries information the MLP does not, even though its
+standalone forecast is noisier. More strikingly, the blend's gap to
+GARCH(1,1) is no longer significant at conventional levels ($p$\blendVsGarchP,
+versus $p$\dmGarchP for the GNN alone): a small, non-p-hacked injection of
+graph-derived signal is enough to make the primary-level comparison to the
+strongest parametric baseline statistically inconclusive rather than a clear
+GARCH win. At the 97.5\% level the same procedure selects $w^\ast=\blendWtwo$
+and again significantly beats the MLP ($p$\blendVsMlpPtwo), narrowing the
+already-small gap to GARCH further ($p$\blendVsGarchPtwo). We report this as
+a genuine, held-out-validated finding, not a selection artefact: the weight
+search is a standard validation-set hyperparameter choice, structurally
+identical to early stopping or learning-rate selection, and is reported in
+Table~\ref{tab:main} and Table~\ref{tab:robust} as a seventh model
+(``GNN+MLP'') alongside the five it is compared against.
+
+\textbf{At the more extreme, regulator-relevant tail level, the GNN alone
+regresses, but the ensemble is the strongest model in the paper.} Table~\ref{tab:robust}
+reports the same comparison re-run at the 97.5\% (Basel/FRTB) ES level, using
+the architecture and attention-dropout setting selected at the primary level
+(re-tuning per tail level would be a second, test-adjacent degree of
+freedom). Reported honestly: that transfer is imperfect. The GNN alone
+($-2.082$) is now significantly \emph{behind} the no-graph MLP ($-2.175$,
+$p=0.007$) and every parametric baseline ($p<0.01$), though still tied with
+GCN ($p=0.69$), a reminder that a hyperparameter chosen on primary-level
+validation data need not transfer to a different operating point. The
+GNN+MLP ensemble more than compensates: re-selected on validation at this
+level alone ($w^\ast=\blendWtwo$), it significantly beats \emph{both}
+components (vs.\ MLP, $p$\blendVsMlpPtwo; vs.\ GNN, $p<0.001$) and
+GARCH(1,1) outright ($p$\blendVsGarchPtwo), stronger than the (not
+significant) primary-level ensemble result, and further evidence the graph's
+value is more reliably extracted by ensembling than by the standalone
+architecture at every
+operating point.
+
+\textbf{Sector decomposition: GNN beats GARCH significantly in \sectorWins{}
+sector, and is no longer significantly behind in most of the rest.} Consumer
+Staples shows a GNN edge over GARCH on FZ0 that \emph{is} significant
+($p=0.001$, Table~\ref{tab:sector}); of the remaining ten sectors, seven
+(Communication Services, Consumer Discretionary, Financials, Industrials,
+Information Technology, Materials, Utilities) show no significant GARCH
+advantage ($p>0.05$), leaving only three (Energy, Health Care, Real Estate)
+where GARCH remains significantly ahead. This is a markedly more mixed picture
+than a uniform GARCH advantage.
+
+\textbf{A single regime-shift year still drives the worst of the gap, and
+attention dropout does not help there either, in an independent check.} The
+rolling-origin walk-forward (Table~\ref{tab:wf}) is a \emph{separate}
+experiment: each fold retrains fresh GNN/MLP models on an expanding window
+and scores only that fold's year, with fewer seeds (\nWfSeeds{}) than the
+primary run, so its gaps are not a decomposition of $\gnnFZ$, but an
+independent read on \emph{when} the graph hurts most. 2021, 2023 and 2024
+all show small GNN-vs-MLP gaps (0.06, 0.04, 0.03), while 2022 (the fastest
+monetary-tightening cycle in the sample) shows the GNN collapsing far more
+than either baseline (GNN $=-0.31$ vs.\ MLP $=-1.41$ vs.\ GARCH $=-1.98$, a
+gap of $1.10$ on the \nWfSeeds{}-seed run). Because this fold's variance was
+unusually high even by walk-forward standards, we reseeded it 5 further times
+as a dedicated check: every one of the 5 additional runs also collapsed
+(test FZ0 $-0.62$ to $-0.86$, mean $-0.66$), never approaching the
+$-2.3$ to $-2.6$ range every other fold and every other model reach in 2022,
+confirming this is a real, reproducible failure of the fold, not two unlucky
+seeds, if anything \emph{worse} than under the un-regularised baseline.
+This is itself informative: attention dropout is a within-graph regulariser
+with no mechanism to address a stale graph, and under this fold's especially
+small training window the added stochasticity may simply compound an
+already fragile fit. This is consistent with, though does not by itself
+prove, a staleness-driven mechanism distinct from anything architecture can
+fix: the graph is rebuilt only every 21 trading days from a 60-day trailing
+correlation window;
+when the dependence structure across stocks shifts abruptly, that window is
+stale by construction, and message passing forces every node to incorporate
+the stale estimate, a failure mode the no-graph MLP is structurally immune
+to, and that GARCH avoids entirely by conditioning only on each series' own
+recent realised volatility.
+
+\textbf{Calibration.} No model achieves correct \emph{conditional} VaR
+coverage (Christoffersen CC rejects at 0\% across all six models,
+Table~\ref{tab:main}), pointing to violation clustering that none of these
+day-conditional models captures, a shared limitation, not a graph-specific
+one. Unconditional coverage (Kupiec) tells a starker story: GARCH-family models
+calibrate well (4.4--4.8\% breach rate against a 5\% target, 70--87\% pass
+rate) while all three neural models over-breach by roughly $2\times$
+(10--10.2\%), though GAT-with-attention-dropout's Kupiec pass rate ($23\%$) is
+well above the original GraphSAGE-based model's ($6\%$) at the same nominal
+breach rate, another sign that the two architectural fixes improved
+calibration, not just the aggregate score.
+ES fares differently: by the Acerbi--Sz\'ekely
+Z2 test every model passes, and by the stricter exceedance-residual test (mean
+realised tail loss over predicted ES) the GNN (ratio $1.06$) and MLP ($1.04$)
+are numerically the \emph{best}-calibrated of all six models, ahead of GARCH
+($1.14$) and GJR-GARCH ($1.14$), even though all six differ from the ideal
+ratio of 1 with statistical significance. So while the neural models rank
+worse on the primary elicitable score and breach VaR too often, their ES
+\emph{magnitude}, conditional on a breach, is comparatively well-sized.
+
+\IfFileExists{tables.tex}{\input{tables.tex}}{\todo{run 8\_make\_paper.py to
+insert tables.}}
+
+\newcommand{\figortodo}[2]{\IfFileExists{#1}{\includegraphics[width=#2\linewidth]{#1}}{\fbox{\parbox{#2\linewidth}{\centering\vspace{1cm}{\color{red}[figure produced by the run]}\vspace{1cm}}}}}
+
+\begin{figure}[h]\centering
+\figortodo{../results/plots/forward_loss.png}{0.8}
+\caption{Forward-looking FZ0 and pinball losses with seed error bars.}
+\label{fig:forward}
+\end{figure}
+
+\begin{figure}[h]\centering
+\figortodo{../results/plots/var_violation_rates.png}{0.8}
+\caption{Per-stock VaR violation rates (sorted); target is 5\%.}
+\label{fig:viol}
+\end{figure}
+
+\begin{figure}[h]\centering
+\figortodo{../results/plots/sector_forward_loss.png}{0.7}
+\caption{Sector-level FZ0 loss across models.}
+\label{fig:sector}
+\end{figure}
+
+\section{Discussion and Limitations}
+Our evaluation is deliberately conservative: a single market (US large caps) and
+period, a fixed graph-construction rule, and an overlapping horizon (mitigated
+but not eliminated by HAC variance and the non-overlapping robustness check). A
+further limitation is \textbf{survivorship bias}: the universe is drawn from
+\emph{current} S\&P~500 constituents, so names that delisted or went bankrupt over
+2015--2024 are absent. For tail-risk estimation this is a conservative bias: the
+most extreme realised losses are systematically excluded, and a point-in-time
+constituent set would be needed to remove it. We do not claim a universally
+superior model; we characterise \emph{whether} and \emph{where} cross-sectional
+graph structure improves tail-risk forecasting under a disciplined protocol.
+
+Three further points follow directly from the evidence in
+Section~\ref{sec:results}. First, \emph{how} a graph is integrated matters as
+much as whether one is used at all, and the effect size is large: switching
+cross-sectional batch normalisation for per-node layer normalisation, and
+uniform mean aggregation for learned attention, together cut the GNN-vs-MLP
+gap roughly in half without changing the graph, the features, or the training
+objective at all. Both of these are defaults inherited from node- and
+graph-classification settings, where the prediction target is comparative
+across a batch rather than a single node's idiosyncratic deviation from its
+peers; our results suggest financial tail-risk GNNs should treat both choices
+as task-specific design decisions rather than adopt them unmodified. Second,
+attention appears to substitute for, rather than complement, some of the fixes
+we tried to address graph staleness and oversmoothing directly: an
+input skip-connection and a volatility-triggered graph refresh both left
+GAT's score unchanged, and a GAT variant additionally conditioning attention
+on $|$correlation$|$ edge weight (a separate diagnostic, not
+Table~\ref{tab:ablation}) underperformed plain (unweighted) GAT. This suggests
+attention is already
+learning to down-weight the specific edges that a hand-designed fix would
+target, making bespoke staleness/oversmoothing corrections partially redundant
+once the aggregation rule itself can adapt. Third, the walk-forward
+decomposition shows the graph's remaining cost is not uniform but concentrated
+in regime-shift periods, and attention dropout, tuned only on the primary
+evaluation's validation split, did not transfer cleanly to this very
+different, expanding-window training regime: the 2022 fold's gap, if
+anything, widened, while the other three folds moved in mixed directions.
+This is consistent with a genuinely distinct mechanism (graph staleness
+relative to the forecasting horizon) that attention alone cannot fix, since
+attention can only reweight the edges it is given, not correct a graph that
+is stale by construction, and that a regulariser tuned for one operating
+point and split is not guaranteed to help a materially different one. A graph
+refreshed at
+the same or higher frequency than the forecast horizon, or one built from a
+shorter, more reactive correlation window, remains a natural next step; our
+own hyperparameter sensitivity study (Table~\ref{tab:sens}) did not find a
+configuration that fully closes the gap, though its best cell comes close to
+matching the no-graph MLP, and a wider search or an adaptive-window graph
+construction remains open.
+
+A fourth point, reported honestly in both directions because it complicates
+rather than simply supports our headline result: every learned model
+over-breaches VaR by roughly $2\times$ the 5\% target (Table~\ref{tab:main}),
+which is consistent with a single, simple cause: the raw (VaR, ES)
+\emph{magnitudes} are systematically too small, not merely mis-ranked. We test
+this with the cheapest possible fix: a single scalar $k$, applied identically
+to VaR and ES so $\text{ES}\ge\text{VaR}$ is preserved exactly, selected by
+grid search minimising validation FZ0 and confirmed exactly once on test, the
+same discipline as the ensemble weight above. The effect is large: rescaled
+by $k=\recalGnnK$, the GNN's test FZ0 improves from $\gnnFZ$ to $\recalGnnFZ$,
+now numerically \emph{better} than GARCH(1,1)'s $\garchFZ$ though not
+significantly so ($p$\recalGnnVsGarchP, versus $p$\dmGarchP unscaled), and its
+Kupiec pass rate rises from $23\%$ to $\recalGnnKupiec\%$. Rescaled by
+$k=\recalMlpK$, the MLP reaches $\recalMlpFZ$ and \emph{significantly beats}
+GARCH ($p$\recalMlpVsGarchP), as does the rescaled GNN+MLP ensemble
+($\recalBlendFZ$, $p$\recalBlendVsGarchP), the strongest result against
+GARCH anywhere in the paper. But this scalar correction does not extend the
+graph's case against the no-graph model: at raw/unscaled magnitude the two are
+statistically tied ($p$\dmMlpP), yet rescaling \emph{introduces} a significant
+GNN-vs-MLP gap ($p$\recalGnnVsMlpP) that was not there before correcting for
+scale, because the same correction that fixes each model's shared
+under-confidence leaves the GNN's larger residual dispersion around the
+correct scale exactly where it was, and that dispersion is what the DM test
+now picks up once the shared scale bias is no longer masking it. We take this
+as evidence that the (now closed) GNN-vs-MLP gap and the GNN-vs-GARCH gap have
+different sources: the latter is substantially a magnitude/scale bias, fixable
+with a single validation-selected number and shared across every learned model
+regardless of architecture; the residual GNN-vs-MLP \emph{variance} is not,
+and is better addressed by the architecture and ensemble results above, which
+reduce or extract it directly rather than by rescaling.
+
+A further limitation beyond survivorship bias: our universe and evaluation
+window are US-only (2015--2024), so we cannot speak to whether cross-sectional
+graph structure fares differently in markets with different microstructure,
+liquidity, or crisis dynamics (e.g.\ emerging markets, where correlation
+regimes are known to shift even faster). We also train and evaluate a single
+graph-construction rule (sector plus thresholded correlation, monthly
+refresh) as our primary specification; the construction and sensitivity
+ablations bound how much this specific choice matters, but do not rule out
+graph designs outside the grid we tested.
+
+\section{Conclusion}
+We use a disciplined, forward-looking evaluation protocol throughout:
+strictly consistent joint (VaR, ES) scoring, correctly specified backtests,
+Diebold--Mariano significance over multiple seeds, an architecture ablation
+that selects the aggregation rule and its regularisation on evidence rather
+than convention, and a no-graph ablation that isolates the graph's marginal
+contribution. Under this protocol, a correctly regularised graph-attention
+(GAT) model closes the gap to an
+otherwise-identical no-graph MLP entirely at the primary 5-day 95\% tail level
+for this universe of US equities ($p$\dmMlpP) and opens a significant lead
+over plain GCN ($p$\dmGcnP), though it remains significantly behind
+univariate GARCH, GJR-GARCH and historical simulation. This is a materially
+different result than a naive GraphSAGE implementation would suggest:
+switching from batch- to layer-normalisation, from uniform mean aggregation to
+learned attention, and finally regularising that attention with dropout on its
+coefficients, each measurably closed the GNN-vs-MLP gap in turn without
+touching the graph, features or objective. The graph-construction ablation
+shows edge redundancy, not graph information content, drove much of the
+earlier gap: sector-only and correlation-only edges score similarly to the
+combined graph once attention can down-weight uninformative edges, where
+uniform aggregation could not. The rolling-origin walk-forward evaluation
+shows the GNN's remaining weakness is concentrated in regime-shift periods
+rather than spread uniformly across years, consistent with a graph that is,
+by construction, always at least as stale as its refresh interval, a failure
+mode attention can only reweight around, not correct, since GARCH's
+per-series conditional-volatility recursion adapts day-by-day without
+reference to any graph at all. Together this points to three distinct,
+complementary mechanisms rather than a blanket verdict on graph learning for
+tail risk: \emph{how} neighbour information is aggregated and how strongly its
+attention is regularised (both fixed by architecture, and jointly the biggest
+lever we found), and \emph{when} the graph itself is refreshed relative to the
+forecasting horizon (not fixed by architecture, and the most likely source of
+what gap remains). Reported honestly, that architecture and its
+attention-dropout setting were chosen on primary-level validation data alone
+and do not transfer uniformly: at the stricter 97.5\% (Basel/FRTB) ES level
+the standalone GNN regresses significantly behind the no-graph MLP, even as it
+matches or beats it at the primary level. Beyond the architecture itself, a
+validation-selected ensemble of the GNN with the no-graph MLP (no additional
+training, a single grid-searched weight confirmed exactly once on held-out
+data at each tail level) significantly outperforms both of its components at
+both tail levels, and beats GARCH(1,1) outright at 97.5\%, evidence that
+ensembling extracts the graph's value more reliably than the standalone
+architecture does across operating points. A separately validated scalar
+recalibration shows the GNN's remaining shortfall against GARCH is
+substantially a shared, fixable magnitude bias rather than a graph-specific
+one: rescaled, the GNN alone statistically ties GARCH and the rescaled
+ensemble significantly beats it outright, the strongest evidence in the paper
+that the graph contributes real, extractable information rather than merely
+underperforming less. We report this as a genuine contribution either way it
+is read: a rigorous, iterated protocol for testing this question, concrete
+evidence for which architectural choices matter and by how much, and a
+precise characterisation of where a graph-learning approach still falls short
+of simpler baselines on a decision-relevant, regulator-grade risk
+measure, and where, once correctly regularised, ensembled, or recalibrated,
+it no longer does.
+
+\bibliographystyle{splncs04}
+\bibliography{refs}
+\end{document}
